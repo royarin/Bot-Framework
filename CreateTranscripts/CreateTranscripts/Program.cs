@@ -24,16 +24,25 @@ namespace CreateTranscripts
         private static CloudStorageAccount cloudStorageAccount = CloudStorageAccount.Parse(storageConnection);
         private static CloudBlobClient client = cloudStorageAccount.CreateCloudBlobClient();
         private static CloudBlobContainer sContainer = client.GetContainerReference(ConfigurationManager.AppSettings["BlobContainerName"]);
+
+        private static string conversationId = string.Empty;
+
         static void Main(string[] args)
         {
             try
             {
+                do
+                {
+                    Console.Write("Enter the conversationId to generate the transcript: ");
+                    var convId = Console.ReadLine();
+                    conversationId = convId.Trim();
+                } while (string.IsNullOrEmpty(conversationId));
+
                 //Get all top level directories in the container i.e. folder per bot channel
                 var blobDirectories = GetTopLevelDirectories().Result;
 
                 foreach (var blobdir in blobDirectories)
                 {
-                    Console.WriteLine(blobdir.Uri);
                     // Create transcripts per channel
                     CreateTranscript(blobdir).Wait();
                 }
@@ -62,91 +71,74 @@ namespace CreateTranscripts
         /// <returns></returns>
         public static async Task CreateTranscript(CloudBlobDirectory directory)
         {
-            Console.WriteLine(directory.Uri);
-
             JArray transcriptList = new JArray();
 
+            var channelId = HttpUtility.UrlDecode(directory.Uri.Segments[directory.Uri.Segments.Length - 1]);
+            if (channelId.EndsWith("/"))
+            {
+                channelId = channelId.Substring(0, channelId.Length - 1);
+            }
+
+            var dirName = GetDirName(channelId, conversationId);
+            var dir = sContainer.GetDirectoryReference(dirName);
+
             // Get all blobs in the current directory (also includes directories)
-            var blobList = await directory.ListBlobsSegmentedAsync(false, BlobListingDetails.None, int.MaxValue, null, null, null);
+            var blobList = await dir.ListBlobsSegmentedAsync(false, BlobListingDetails.None, int.MaxValue, null, null, null);
 
-            // Get the list of the all directories from the list of blobs. These are the blob delimeters that are same as Conversation Id.
-            var subdir = blobList.Results.OfType<CloudBlobDirectory>().ToList();
+            // Get all activity blobs
+            var activities = blobList.Results.Cast<CloudBlob>().Where(blob => Path.GetExtension(blob.Uri.ToString()).Equals(".json")).ToList().OrderBy(blob => blob.Properties.LastModified);
 
-            foreach (var sdir in subdir)
+            //Check if there are activities
+            if (activities.Count() > 0)
             {
-                // Recursively look in these folders
-                await CreateTranscript(sdir);
-            }
-
-            // Get blobs in the directory
-            var fileBlobs = blobList.Results.OfType<CloudBlob>();
-            if (fileBlobs.Count() == 0)
-            {
-                return;
-            }
-
-            // Check if there is already a transcript file
-            var transcripts = fileBlobs.Cast<CloudBlob>().Where(blob => Path.GetExtension(blob.Uri.ToString()).Equals(".transcript")).ToList();
-            // Skip if transcript file already exists
-            if (transcripts.Count() > 0)
-            {
-                return;
-            }
-
-            // Get all ativity logs ordered by LastModified Timestamp
-            var files = blobList.Results.Cast<CloudBlob>().Where(blob => !Path.GetExtension(blob.Uri.ToString()).Equals(".transcript")).ToList().OrderBy(blob => blob.Properties.LastModified);
-
-            if (files.Count() > 0)
-            {
-                foreach (var file in files)
+                foreach (var activity in activities)
                 {
-                    Console.WriteLine(HttpUtility.UrlDecode(file.Uri.ToString()));
-                    Console.WriteLine(file.Properties.LastModified);
-
-                    // If the latest activity log is less than 5 mins old, there is possibility that this is still an active conversation
-                    // We skip creating transcripts for such conversations
-                    if (file.Properties.LastModified > DateTime.Now.AddMinutes(-5))
-                    {
-                        return;
-                    }
-
-                    var blob = directory.GetBlobReference(HttpUtility.UrlDecode(file.Uri.Segments[file.Uri.Segments.Length - 1]));
-
                     string blobContent;
 
                     // Read blob content
-                    using (StreamReader reader = new StreamReader(await blob.OpenReadAsync()))
+                    using (StreamReader reader = new StreamReader(await activity.OpenReadAsync()))
                     {
                         blobContent = reader.ReadToEnd();
                     }
-
-
-                    //Console.WriteLine(blobContent);
 
                     JObject act = JObject.Parse(blobContent);
 
                     // Add activity content to transcript
                     transcriptList.Add(act);
-
-
                 }
-                //Console.WriteLine(transcriptList.ToString());
-                var directoryName = HttpUtility.UrlDecode(files.FirstOrDefault().Uri.Segments[files.FirstOrDefault().Uri.Segments.Length - 2]);
 
-                // Create transcript blo reference. Transcript blobs are created with same name as Conversation Id for context
-                var blobReference = directory.GetBlockBlobReference($"{directoryName.Substring(0, directoryName.Length - 1)}.transcript");
-                blobReference.Properties.ContentType = "application/json";
-
-                using (var blobStream = await blobReference.OpenWriteAsync().ConfigureAwait(false))
+                // Verify and create transcript output path if not present
+                var transcriptPath = $"{Environment.CurrentDirectory}/MyTranscripts";
+                if (!Directory.Exists(transcriptPath))
                 {
-                    using (var jsonWriter = new JsonTextWriter(new StreamWriter(blobStream)))
-                    {
-                        _jsonSerializer.Serialize(jsonWriter, transcriptList);
-                    }
+                    Directory.CreateDirectory(transcriptPath);
                 }
-
-                await blobReference.SetMetadataAsync().ConfigureAwait(false);
+                
+                // Write transcript to file in transcript path
+                using (StreamWriter file = File.CreateText($"{transcriptPath}/{SanitizeKey(conversationId)}.transcript"))
+                using (JsonTextWriter writer = new JsonTextWriter(file))
+                {
+                    transcriptList.WriteTo(writer);
+                }
             }
+        }
+
+        private static string GetDirName(string channelId, string conversationId)
+        {
+            string dirName = string.Empty;
+
+            var convId = SanitizeKey(conversationId);
+            NameValidator.ValidateDirectoryName(channelId.ToString());
+            NameValidator.ValidateDirectoryName(convId);
+            dirName = $"{channelId}/{convId}";
+
+            return dirName;
+        }
+
+        private static string SanitizeKey(string key)
+        {
+            // Blob Name rules: case-sensitive any url char
+            return Uri.EscapeDataString(key);
         }
     }
 }
