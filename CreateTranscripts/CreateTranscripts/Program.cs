@@ -25,6 +25,8 @@ namespace CreateTranscripts
         private static CloudBlobClient client = cloudStorageAccount.CreateCloudBlobClient();
         private static CloudBlobContainer sContainer = client.GetContainerReference(ConfigurationManager.AppSettings["BlobContainerName"]);
 
+        private static string transcriptPath = $"{Environment.CurrentDirectory}/MyTranscripts";
+
         private static string conversationId = string.Empty;
 
         static void Main(string[] args)
@@ -34,8 +36,7 @@ namespace CreateTranscripts
                 do
                 {
                     Console.Write("Enter the conversationId to generate the transcript: ");
-                    var convId = Console.ReadLine();
-                    conversationId = convId.Trim();
+                    conversationId = Console.ReadLine().Trim();
                 } while (string.IsNullOrEmpty(conversationId));
 
                 //Get all top level directories in the container i.e. folder per bot channel
@@ -108,7 +109,6 @@ namespace CreateTranscripts
                 }
 
                 // Verify and create transcript output path if not present
-                var transcriptPath = $"{Environment.CurrentDirectory}/MyTranscripts";
                 if (!Directory.Exists(transcriptPath))
                 {
                     Directory.CreateDirectory(transcriptPath);
